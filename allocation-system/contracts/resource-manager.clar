@@ -1,5 +1,5 @@
 ;; Resource Allocation Contract V2
-;; Enhanced version with additional features
+;; Enhanced version with additional features and error fixes
 
 ;; Error Constants
 (define-constant CONTRACT_ADMINISTRATOR tx-sender)
@@ -13,6 +13,7 @@
 (define-constant ERROR_INVALID_PRIORITY_LEVEL (err u107))
 (define-constant ERROR_RESOURCE_LOCKED (err u108))
 (define-constant ERROR_EXPIRED_REQUEST (err u109))
+(define-constant ERROR_INVALID_INPUT (err u110))
 
 ;; Data Variables
 (define-data-var contract-status-initialized bool false)
@@ -67,10 +68,7 @@
 )
 
 (define-private (verify-resource-type-exists (resource-type-id uint))
-    (match (map-get? available-resource-types resource-type-id)
-        resource-data true
-        false
-    )
+    (is-some (map-get? available-resource-types resource-type-id))
 )
 
 (define-private (check-user-authorization (user-address principal))
@@ -80,7 +78,6 @@
     )
 )
 
-;; Private Functions
 (define-private (get-user-priority-level (user-address principal))
     (let ((user-role (default-to "USER" (map-get? user-roles user-address))))
         (if (is-eq user-role "ADMIN")
@@ -93,7 +90,6 @@
                         u2
                         u1)))))) ;; Default USER level
 
-;; Private Function
 (define-private (record-price-update (resource-type-id uint) (new-price uint))
     (let (
         (current-history (default-to (list) (map-get? resource-price-history resource-type-id)))
@@ -101,6 +97,10 @@
     )
         (ok (map-set resource-price-history resource-type-id new-history))
     )
+)
+
+(define-private (is-valid-principal (address principal))
+    (is-standard address)
 )
 
 ;; Read Only Functions
@@ -151,6 +151,8 @@
 (define-public (update-system-parameters (new-limit uint) (new-emergency-contact principal))
     (begin
         (asserts! (is-administrator-access) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (> new-limit u0) ERROR_INVALID_INPUT)
+        (asserts! (is-valid-principal new-emergency-contact) ERROR_INVALID_INPUT)
         (var-set global-resource-limit new-limit)
         (var-set emergency-contact-address new-emergency-contact)
         (ok true)
@@ -171,6 +173,11 @@
         (asserts! (validate-resource-amount initial-supply) ERROR_INVALID_RESOURCE_AMOUNT)
         (asserts! (validate-resource-amount unit-price) ERROR_INVALID_RESOURCE_AMOUNT)
         (asserts! (<= priority-level u5) ERROR_INVALID_PRIORITY_LEVEL)
+        (asserts! (>= min-allocation u1) ERROR_INVALID_INPUT)
+        (asserts! (> max-allocation min-allocation) ERROR_INVALID_INPUT)
+        (asserts! (<= max-allocation initial-supply) ERROR_INVALID_INPUT)
+        (asserts! (not (verify-resource-type-exists resource-type-id)) ERROR_INVALID_INPUT)
+        (asserts! (>= (len resource-name) u1) ERROR_INVALID_INPUT)
         (map-set available-resource-types resource-type-id {
             resource-name: resource-name,
             resource-total-supply: initial-supply,
@@ -193,6 +200,7 @@
     )
         (asserts! (is-administrator-access) ERROR_UNAUTHORIZED_ACCESS)
         (asserts! (validate-resource-amount new-price) ERROR_INVALID_RESOURCE_AMOUNT)
+        (asserts! (verify-resource-type-exists resource-type-id) ERROR_RESOURCE_TYPE_NOT_FOUND)
         
         ;; Record price history and handle potential error
         (try! (record-price-update resource-type-id new-price))
@@ -212,6 +220,8 @@
 (define-public (update-user-role (user-address principal) (new-role (string-ascii 20)))
     (begin
         (asserts! (is-administrator-access) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (is-valid-principal user-address) ERROR_INVALID_INPUT)
+        (asserts! (or (is-eq new-role "ADMIN") (is-eq new-role "PREMIUM") (is-eq new-role "BUSINESS") (is-eq new-role "VERIFIED") (is-eq new-role "USER")) ERROR_INVALID_INPUT)
         (map-set user-roles user-address new-role)
         (ok true)
     )
@@ -220,6 +230,8 @@
 (define-public (blacklist-user (user-address principal))
     (begin
         (asserts! (is-administrator-access) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (is-valid-principal user-address) ERROR_INVALID_INPUT)
+        (asserts! (not (is-eq user-address CONTRACT_ADMINISTRATOR)) ERROR_INVALID_INPUT)
         (map-set blacklisted-users user-address true)
         (ok true)
     )
@@ -228,6 +240,7 @@
 (define-public (remove-user-blacklist (user-address principal))
     (begin
         (asserts! (is-administrator-access) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (is-valid-principal user-address) ERROR_INVALID_INPUT)
         (map-set blacklisted-users user-address false)
         (ok true)
     )
@@ -252,6 +265,7 @@
         (asserts! (>= requested-quantity (get minimum-allocation resource-type-info)) ERROR_INVALID_RESOURCE_AMOUNT)
         (asserts! (<= requested-quantity (get maximum-allocation resource-type-info)) ERROR_RESOURCE_LIMIT_EXCEEDED)
         (asserts! (>= user-priority (get resource-priority-level resource-type-info)) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (>= (len allocation-purpose) u1) ERROR_INVALID_INPUT)
         
         (map-set pending-allocation-requests new-request-id {
             requesting-user: tx-sender,
@@ -279,6 +293,7 @@
         (asserts! (check-user-authorization recipient) ERROR_INVALID_TRANSFER_DESTINATION)
         (asserts! (<= transfer-amount sender-balance) ERROR_INSUFFICIENT_RESOURCE_BALANCE)
         (asserts! (not (get resource-locked resource-type-info)) ERROR_RESOURCE_LOCKED)
+        (asserts! (is-valid-principal recipient) ERROR_INVALID_INPUT)
         
         ;; Update balances
         (map-set user-resource-balances tx-sender (- sender-balance transfer-amount))
@@ -304,6 +319,7 @@
         (var-set resource-allocation-system-paused false)
         (ok true)
     )
+
 )
 
 (define-public (lock-resource (resource-type-id uint))
@@ -311,6 +327,7 @@
         (resource-type-info (unwrap! (map-get? available-resource-types resource-type-id) ERROR_RESOURCE_TYPE_NOT_FOUND))
     )
         (asserts! (is-administrator-access) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (verify-resource-type-exists resource-type-id) ERROR_RESOURCE_TYPE_NOT_FOUND)
         (map-set available-resource-types resource-type-id 
             (merge resource-type-info { resource-locked: true })
         )
@@ -323,6 +340,7 @@
         (resource-type-info (unwrap! (map-get? available-resource-types resource-type-id) ERROR_RESOURCE_TYPE_NOT_FOUND))
     )
         (asserts! (is-administrator-access) ERROR_UNAUTHORIZED_ACCESS)
+        (asserts! (verify-resource-type-exists resource-type-id) ERROR_RESOURCE_TYPE_NOT_FOUND)
         (map-set available-resource-types resource-type-id 
             (merge resource-type-info { resource-locked: false })
         )
